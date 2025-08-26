@@ -1,0 +1,16 @@
+# Python virtual environment
+venv/
+
+# Local vector store database
+chroma_db/
+
+# Python cache files
+__pycache__/
+*.pyc
+
+# Backup files
+*.py_bak
+*_before-rag
+
+# Source documents
+*.pdf
