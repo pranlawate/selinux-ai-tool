@@ -1,4 +1,4 @@
-from langchain_community.document_loaders import PyPDFLoader
+from langchain_community.document_loaders import DirectoryLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_ollama import OllamaEmbeddings
 from langchain_chroma import Chroma
@@ -6,10 +6,13 @@ import sys
 
 # Define the directory to save the vector store
 PERSIST_DIRECTORY = "./chroma_db"
+# A directory to load documents from
+SOURCE_DIRECTORY = "./knowledge_base"
 
-print("Loading PDF document...")
+print("Loading documents from {SOURCE_DIRECTORY}...")
 try:
-    loader = PyPDFLoader("SELinux_Notebook.pdf")
+    # This loader will automatically load all supported file types from the directory
+    loader = DirectoryLoader(SOURCE_DIRECTORY, glob="**/*",show_progress=True)
     docs = loader.load()
 except Exception as e:
     print(f"Error loading PDF: {e}")
@@ -20,7 +23,6 @@ print(f"Loaded {len(docs)} documents.")
 print("Splitting document into text chunks...")
 text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
 splits = text_splitter.split_documents(docs)
-
 print(f"Split into {len(splits)} chunks.")
 
 print("Creating embeddings and building the persistent vector store...")

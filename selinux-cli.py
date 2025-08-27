@@ -2,6 +2,7 @@ import argparse
 import requests
 import json
 import sys
+import subprocess
 from rich.console import Console
 from rich.panel import Panel
 from rich.syntax import Syntax
@@ -18,17 +19,25 @@ def fix(args):
     console = Console()
 
     console.print("📋 Please paste your SELinux AVC denial log below and press [bold yellow]Ctrl+D[/bold yellow] (or Ctrl+Z on Windows) when done:")
-
-  
     avc_log = sys.stdin.read().strip()
 
     if not avc_log:
         console.print("Error: No log provided. Exiting.", style="bold red")
         sys.exit(1)
 
-    console.print("\n🔍 Sending log to AI for analysis...")
-
+    console.print("\n🔍 Collecting local SELinux booleans...")
     try:
+        # Collect the live booleans from the user's system
+        result = subprocess.run(["getsebool", "-a"], capture_output=True, text=True, check=True)
+        booleans_text = result.stdout.strip().replace('-->', ' - ')
+    except (FileNotFoundError, subprocess.CalledProcessError) as e:
+        console.print(f"Error collecting booleans: {e}. Proceeding without them.", style="bold red")
+        booleans_text = ""
+
+    console.print("\n🔍 Sending log to AI for analysis...")
+    try:
+        # Send both the log and the live booleans to the server
+        payload = {"avc_log": avc_log, "booleans": booleans_text}
         response = requests.post(BACKEND_URL, json={"log": avc_log})
         response.raise_for_status()
 
