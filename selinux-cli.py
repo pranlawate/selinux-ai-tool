@@ -11,6 +11,32 @@ from rich.rule import Rule
 # --- Configuration ---
 BACKEND_URL = "http://127.0.0.1:5000/analyze-avc"
 
+def collect_selinux_context(console: Console) -> str:
+    """Collects a comprehensive snapshot of the live SELinux policy."""
+    console.print("\n🔍 Collecting live SELinux policy snapshot...")
+
+    # List of commands to run to get a full system context
+    commands = {
+        "Booleans": ["getsebool", "-a"],
+        "File Contexts": ["semanage", "fcontext", "-l"],
+        "Classes": ["seinfo", "--class"],
+        "Roles": ["seinfo", "--role"],
+        "Types": ["seinfo", "--type"],
+        "Users": ["seinfo", "--user"]
+    }
+
+    full_context = ""
+    for name, command in commands.items():
+        try:
+            result = subprocess.run(command, capture_output=True, text=True, check=True)
+            # Add a header for each section for the AI's context
+            full_context += f"--- {name} ---\n{result.stdout.strip()}\n\n"
+        except (FileNotFoundError, subprocess.CalledProcessError) as e:
+            error_msg = e.stderr.strip() if hasattr(e, 'stderr') and e.stderr else str(e)
+            console.print(f"Warning: Could not collect {name.lower()}: {error_msg}", style="yellow")
+
+    return full_context
+
 def fix(args):
     """
     Analyzes an SELinux AVC denial log provided by the user.
@@ -25,20 +51,18 @@ def fix(args):
         console.print("Error: No log provided. Exiting.", style="bold red")
         sys.exit(1)
 
-    console.print("\n🔍 Collecting local SELinux booleans...")
-    try:
-        # Collect the live booleans from the user's system
-        result = subprocess.run(["getsebool", "-a"], capture_output=True, text=True, check=True)
-        booleans_text = result.stdout.strip().replace('-->', ' - ')
-    except (FileNotFoundError, subprocess.CalledProcessError) as e:
-        console.print(f"Error collecting booleans: {e}. Proceeding without them.", style="bold red")
-        booleans_text = ""
+    # Collect the full, live SELinux context from the system
+    selinux_context = collect_selinux_context(console)
 
     console.print("\n🔍 Sending log to AI for analysis...")
+ 
     try:
-        # Send both the log and the live booleans to the server
-        payload = {"avc_log": avc_log, "booleans": booleans_text}
-        response = requests.post(BACKEND_URL, json={"log": avc_log})
+        # Send the AVC log, booleans and file contexts to the server
+        payload = {
+                "avc_log": avc_log,
+                "selinux_context": selinux_context
+                }
+        response = requests.post(BACKEND_URL, json=payload)
         response.raise_for_status()
 
         ai_response_str = response.json()
@@ -59,9 +83,19 @@ def fix(args):
         console.print(Rule("[bold yellow]Suggested Commands[/bold yellow]"))
 
         # Display commands with shell syntax highlighting
+        # The 'commands' value is a list, so we iterate through it
+        # and create a Syntax object for each command string in the list.
         for cmd in ai_data['commands']:
             syntax = Syntax(cmd, "shell", theme="monokai", line_numbers=False)
             console.print(syntax)
+
+        # --- ADDED: Display alternative solutions if they exist ---
+        if ai_data.get("alternatives"):
+            console.print(Rule("[bold magenta]Alternative Solutions[/bold magenta]"))
+            for alt_cmd in ai_data["alternatives"]:
+                syntax = Syntax(alt_cmd, "shell", theme="monokai", line_numbers=False)
+                console.print(syntax)
+        # ---------------------------------------------------------
 
     except requests.exceptions.RequestException as e:
         console.print(f"Error connecting to the analysis server: {e}", style="bold red")
