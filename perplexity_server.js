@@ -4,16 +4,19 @@ require('dotenv').config();
 const app = express();
 app.use(express.json({ limit: '50mb' }));
 
+console.log(`PERPLEXITY_API_KEY loaded: ${process.env.PERPLEXITY_API_KEY ? 'Yes' : 'No'}`);
+
 const PPLX_API_KEY = process.env.PERPLEXITY_API_KEY;
 
-const createPrompt = (avc_log) => { 
+const createPrompt = (avc_log, system_info, sesearch_result) => { 
 	const system_prompt =`You are an expert SELinux system administrator. Your task is to analyze the provided AVC denial log using the live system context.
 Your final response MUST BE ONLY a single, valid JSON object with three keys: "explanation", "commands", and "alternatives".
 
 **TASK:**
-1.  Analyze the scontext, tcontext, tclass, and permission from the AVC LOG.
+1.  First, review the 'sesearch Result'. If no direct 'allow' rule was found, proceed with the analysis.
+2.  Analyze the scontext, tcontext, tclass, and permission from the AVC LOG. Use the 'System Information' to understand the OS version.
 2.  Identify the process executable from the exe= or comm= field.
-3.  For a TCONTEXT_MISMATCH: Cross-reference the process executable with the semanage fcontext -l list in the CONTEXT to find the correct file context.
+3.  For a TCONTEXT_MISMATCH: Determine the correct file context based on your knowledge of standard Red Hat policies for the given OS version.
 4.  For an SCONTEXT_MISMATCH: Verify if the 'scontext' is correct for the given process executable.
 5.  If contexts appear correct, check for a "BOOLEAN" issue.
 
@@ -22,10 +25,19 @@ Your final response MUST BE ONLY a single, valid JSON object with three keys: "e
 - Do NOT invent booleans or contexts not found in the CONTEXT.
 - After every semanage fcontext command, you MUST include the corresponding restorecon command.
 - DO NOT include escaped backslash in the output
+`
+	const user_prompt = `
+Base your answer ONLY on information from official Red Hat documentation (redhat.com or access.redhat.com).
 
-Base your answer ONLY on information from official Red Hat documentation (redhat.com or access.redhat.com).`
-	const user_prompt = `### AVC Denial Log to Analyze ###
-${avc_log}`;
+	### System Information ###
+	${system_info}
+	
+	### sesearch Result ###
+	${sesearch_result}
+	
+	### AVC Denial Log to Analyze ###
+	${avc_log}`;
+	
 	return {
 		model: "sonar-reasoning",
 		messages: [

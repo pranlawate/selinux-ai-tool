@@ -89,6 +89,48 @@ def print_summary(console: Console, parsed_log: dict):
 
     console.print("-" * 35)
 
+def collect_system_info(console: Console) -> str:
+    """Collects RHEL version and SELinux status."""
+    console.print("\n🔍 Collecting system information...")
+    sys_info = ""
+    try:
+        # Get RHEL version
+        result = subprocess.run(["cat", "/etc/redhat-release"], capture_output=True, text=True, check=True)
+        sys_info += f"OS Version: {result.stdout.strip()}\n"
+    except Exception as e:
+        console.print(f"Warning: Could not get RHEL version: {e}", style="yellow")
+    
+    try:
+        # Get SELinux status and policy
+        result = subprocess.run(["sestatus"], capture_output=True, text=True, check=True)
+        sys_info += f"SELinux Status:\n{result.stdout.strip()}"
+    except Exception as e:
+        console.print(f"Warning: Could not get SELinux status: {e}", style="yellow")
+        
+    return sys_info
+
+def run_sesearch(console: Console, parsed_log: dict) -> str:
+    """Runs a targeted sesearch query based on the parsed log."""
+    console.print("\n🔍 Running targeted sesearch query...")
+    scontext = parsed_log.get("scontext", "").split(':')[2]
+    tcontext = parsed_log.get("tcontext", "").split(':')[2]
+    tclass = parsed_log.get("tclass")
+    permission = parsed_log.get("permission")
+    sesearch_result = "sesearch query could not be run."
+
+    if scontext and tcontext and tclass and permission:
+        try:
+            sesearch_cmd = ["sesearch", "-A", "-s", scontext, "-t", tcontext, "-c", tclass, "-p", permission]
+            result = subprocess.run(sesearch_cmd, capture_output=True, text=True, check=False)
+            if result.stdout:
+                sesearch_result = f"Found allow rule(s):\n{result.stdout.strip()}"
+            else:
+                sesearch_result = "No direct 'allow' rule was found for this specific action."
+        except Exception as e:
+            sesearch_result = f"Warning: Could not run sesearch: {e}"
+            console.print(sesearch_result, style="yellow")
+    return sesearch_result
+
 def main_logic():
     """
     Analyzes an SELinux AVC denial log provided by the user.
@@ -107,14 +149,17 @@ def main_logic():
     parsed_log = parse_audit_log(avc_log)
     print_summary(console, parsed_log)
     # ----------------------------------------------
-   
+  
+    system_info = collect_system_info(console)
+    sesearch_result = run_sesearch(console, parsed_log)
     console.print("\n🔍 Sending log to AI for analysis...")
  
     try:
         # Send the AVC log, booleans and file contexts to the server
         payload = {
                 "avc_log": avc_log,
-                "parsed_log": parsed_log,
+                "system_info": system_info,
+                "sesearch_result": sesearch_result
                 }
         response = requests.post(BACKEND_URL, json=payload)
         response.raise_for_status()
