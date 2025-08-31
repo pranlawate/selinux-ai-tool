@@ -39,7 +39,7 @@ Base your answer ONLY on information from official Red Hat documentation (redhat
 	${avc_log}`;
 	
 	return {
-		model: "sonar-reasoning",
+		model: "sonar-reasoning-pro",
 		messages: [
 			{ role: "system", content: system_prompt },
 			{ role: "user", content: user_prompt }
@@ -53,8 +53,8 @@ app.post("/analyze-avc", async (req,res)=>{
 
 	}
 
-	const {avc_log, parsed_log} = req.body;
-	const requestBody = createPrompt(avc_log);
+	const {avc_log, system_info,sesearch_result } = req.body;
+	const requestBody = createPrompt(avc_log, system_info, sesearch_result);
 
 	console.log("--- Preparing to send this body to Perplexity API ---");
 	console.log(JSON.stringify(requestBody, null, 2));
