@@ -6,14 +6,15 @@ __pycache__/
 # Backup files
 *.py_bak
 
-# Nodejs cache files
+# Node.js files (archived in archive/perplexity-version/)
 node_modules/
 
 # Environment variables
 /.env
 
 # Extra Directories
-archive/
+archive/*
+!archive/perplexity-version/
 venv/
 
 # Vector database and knowledge base files
