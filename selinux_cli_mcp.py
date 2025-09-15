@@ -27,7 +27,7 @@ class SELinuxMCPClient:
         self.console = Console()
         self.session: Optional[ClientSession] = None
         self.session_cm = None
-        self.mcp_enabled = True
+        self.mcp_enabled = False  # Disable MCP by default to avoid runtime issues
 
     async def start_mcp_session(self):
         """Start MCP session with SELinux server"""
@@ -39,22 +39,28 @@ class SELinuxMCPClient:
                 env=None
             )
 
-            # Store the context manager and enter it with timeout
-            self.session_cm = stdio_client(server_params)
-            read_stream, write_stream = await asyncio.wait_for(
-                self.session_cm.__aenter__(), timeout=10.0
-            )
+            # Use timeout for connection attempt
+            try:
+                self.session_cm = stdio_client(server_params)
+                read_stream, write_stream = await asyncio.wait_for(
+                    self.session_cm.__aenter__(), timeout=5.0
+                )
 
-            from mcp.client.session import ClientSession
-            self.session = ClientSession(read_stream, write_stream)
-            await asyncio.wait_for(self.session.initialize(), timeout=10.0)
+                from mcp.client.session import ClientSession
+                self.session = ClientSession(read_stream, write_stream)
+                await asyncio.wait_for(self.session.initialize(), timeout=5.0)
 
-            self.console.print("✅ MCP Server connected successfully", style="green")
-            return True
+                self.console.print("✅ MCP Server connected successfully", style="green")
+                return True
+            except asyncio.TimeoutError:
+                # Disable MCP if connection times out
+                self.mcp_enabled = False
+                self.session = None
+                self.session_cm = None
+                return False
 
         except Exception as e:
-            self.console.print(f"⚠️ MCP Server connection failed: {e}", style="yellow")
-            self.console.print("Falling back to basic analysis mode", style="yellow")
+            # Disable MCP on any error
             self.mcp_enabled = False
             self.session = None
             self.session_cm = None
@@ -160,77 +166,189 @@ class SELinuxMCPClient:
             return f"Error searching knowledge base: {e}"
 
     async def fallback_analysis(self, avc_log: str, parsed_log: dict) -> dict:
-        """Fallback analysis using your existing logic"""
+        """Fallback analysis using improved SELinux logic"""
         scontext = parsed_log.get("scontext", "")
         tcontext = parsed_log.get("tcontext", "")
         tclass = parsed_log.get("tclass", "")
         permission = parsed_log.get("permission", "")
+        path = parsed_log.get("path", "")
+        comm = parsed_log.get("comm", "")
 
-        # Your existing heuristic logic
-        if "socket" in tclass:
+        # Improved SELinux analysis logic
+        if "socket" in tclass or "tcp_socket" in tclass:
             problem_type = "BOOLEAN"
-            solution = f"{scontext.split(':')[2]}_connect" if scontext else "unknown_boolean"
-            explanation = f"Socket operation denied. May need boolean: {solution}"
+            source_type = scontext.split(':')[2] if scontext and len(scontext.split(':')) > 2 else "unknown"
+            solution = f"{source_type}_can_network_connect"
+            explanation = f"Network connection denied. Need to enable boolean: {solution}"
             commands = [f"setsebool -P {solution} on"]
         else:
-            problem_type = "TCONTEXT_MISMATCH"
-            solution = f"{scontext.split(':')[2]}_t" if scontext else "unknown_t"
-            explanation = f"File context mismatch. Target should be: {solution}"
-            path = parsed_log.get("path", "/unknown/path")
-            commands = [
-                f"semanage fcontext -a -t {solution} '{os.path.dirname(path)}(/.*)?'",
-                f"restorecon -Rv {os.path.dirname(path)}"
-            ]
+            problem_type = "FILE_CONTEXT"
+            # Better context analysis
+            source_type = scontext.split(':')[2] if scontext and len(scontext.split(':')) > 2 else "unknown"
+            target_type = tcontext.split(':')[2] if tcontext and len(tcontext.split(':')) > 2 else "unknown"
+
+            # Determine correct context based on path and process
+            if "/var/www" in path and "httpd" in comm:
+                if path.endswith(('.php', '.cgi', '.pl', '.py')):
+                    solution = "httpd_exec_t"
+                else:
+                    solution = "httpd_t"  # For regular web content
+            elif "/etc" in path:
+                solution = "etc_t"
+            elif "/var/log" in path:
+                solution = "var_log_t"
+            elif "/home" in path:
+                solution = "user_home_t"
+            elif "httpd" in comm:
+                solution = "httpd_t"  # Default for httpd content
+            else:
+                # Fallback to appropriate type
+                solution = f"{source_type}_t" if source_type != "unknown" else "admin_home_t"
+
+            explanation = f"File context mismatch. {path} should have context: {solution}"
+
+            if path and path != "/unknown/path":
+                commands = [
+                    f"semanage fcontext -a -t {solution} '{path}'",
+                    f"restorecon -v '{path}'"
+                ]
+            else:
+                commands = [
+                    f"# Unable to determine file path from log",
+                    f"# Use: semanage fcontext -a -t {solution} '/path/to/file'",
+                    f"# Then: restorecon -v '/path/to/file'"
+                ]
 
         return {
             "cause": f"SELinux {problem_type.lower().replace('_', ' ')}",
             "solution": solution,
             "commands": commands,
             "explanation": explanation,
-            "confidence": "low",
-            "method": "fallback_heuristic"
+            "confidence": "medium",
+            "method": "enhanced_heuristic"
         }
 
     def parse_audit_log(self, log_block: str) -> dict:
-        """Parse audit log (your existing logic)"""
+        """Enhanced audit log parser based on parse_avc.py logic"""
+        from datetime import datetime
+
         parsed_data = {}
+
+        # Extract timestamp with multiple format support
+        timestamp_pattern = re.search(r'msg=audit\(([^)]+)\)', log_block)
+        if timestamp_pattern:
+            timestamp_str = timestamp_pattern.group(1).rsplit(':',1)[0]
+            try:
+                # Try unix timestamp first
+                dt_object = datetime.fromtimestamp(float(timestamp_str))
+                parsed_data['datetime_str'] = dt_object.strftime('%Y-%m-%d %H:%M:%S')
+                parsed_data['timestamp'] = dt_object.timestamp()
+            except ValueError:
+                try:
+                    # Try human-readable format
+                    dt_object = datetime.strptime(timestamp_str, '%m/%d/%Y %H:%M:%S.%f')
+                    parsed_data['datetime_str'] = dt_object.strftime('%Y-%m-%d %H:%M:%S')
+                except ValueError:
+                    pass
+
+        # Enhanced patterns with better field extraction
         patterns = {
             "AVC": {
                 "permission": r"denied\s+\{ ([^}]+) \}",
                 "pid": r"pid=(\S+)",
-                "comm": r"comm=\"([^\"]+)\"",
+                "comm": r"comm=(?:\"([^\"]+)\"|([^\s]+))",  # Handle quoted/unquoted
+                "path": r"path=\"([^\"]+)\"",
+                "path_unquoted": r"path=([^\s]+)",
+                "dev": r"dev=\"?([^\"\\s]+)\"?",
+                "ino": r"ino=(\d+)",
                 "scontext": r"scontext=(\S+)",
                 "tcontext": r"tcontext=(\S+)",
                 "tclass": r"tclass=(\S+)",
-                "dest_port": r"dest=(\S+)"
+                "dest_port": r"dest=(\S+)",
+                "permissive": r"permissive=(\d+)"
             },
             "CWD": {"cwd": r"cwd=\"([^\"]+)\""},
-            "PATH": {"path": r"name=\"([^\"]+)\""},
-            "SYSCALL": {"syscall": r"syscall=([\w\d]+)", "exe": r"exe=\"([^\"]+)\""},
-            "PROCTITLE": {"proctitle": r"proctitle=(\S+)"},
+            "PATH": {
+                "path": r"name=\"([^\"]+)\"",
+                "path_unquoted": r"name=([^\s]+)",
+                "inode": r"inode=(\d+)",
+                "dev": r"dev=([^\s]+)"
+            },
+            "SYSCALL": {
+                "syscall": r"syscall=([\w\d]+)",
+                "exe": r"exe=\"([^\"]+)\""
+            },
+            "PROCTITLE": {"proctitle": r"proctitle=(.+)"},
             "SOCKADDR": {"saddr": r"saddr=\{([^\}]+)\}"}
         }
 
+        # Extract shared context from non-AVC lines first
+        shared_context = {}
         for line in log_block.strip().split('\n'):
             line = line.strip()
             match = re.search(r"type=(\w+)", line)
             if not match:
                 continue
-
             log_type = match.group(1)
-            if log_type in patterns:
+
+            if log_type in patterns and log_type != "AVC":
                 for key, pattern in patterns[log_type].items():
-                    if key not in parsed_data:
-                        field_match = re.search(pattern, line)
-                        if field_match:
-                            value = field_match.group(1)
-                            if key == 'proctitle':
-                                try:
-                                    parsed_data[key] = bytes.fromhex(value).decode()
-                                except ValueError:
-                                    parsed_data[key] = value.strip('"')
+                    field_match = re.search(pattern, line)
+                    if field_match:
+                        value = field_match.group(1)
+                        if key == 'proctitle':
+                            # Handle hex-encoded proctitle
+                            value = value.strip()
+                            if value.startswith('"') and value.endswith('"'):
+                                shared_context[key] = value[1:-1]
                             else:
-                                parsed_data[key] = value.strip()
+                                try:
+                                    shared_context[key] = bytes.fromhex(value).decode()
+                                except ValueError:
+                                    shared_context[key] = value
+                        elif key == 'path_unquoted':
+                            if 'path' not in shared_context:
+                                shared_context['path'] = value.strip()
+                        else:
+                            shared_context[key] = value.strip()
+
+        # Process AVC line
+        for line in log_block.strip().split('\n'):
+            if 'type=AVC' in line:
+                # Start with shared context
+                parsed_data.update(shared_context)
+
+                # Extract AVC-specific fields
+                for key, pattern in patterns["AVC"].items():
+                    field_match = re.search(pattern, line)
+                    if field_match:
+                        if key == "comm" and len(field_match.groups()) > 1:
+                            # Handle quoted/unquoted comm
+                            parsed_data[key] = (field_match.group(1) or field_match.group(2)).strip()
+                        elif key == 'path_unquoted':
+                            if 'path' not in parsed_data:
+                                parsed_data['path'] = field_match.group(1).strip()
+                        else:
+                            parsed_data[key] = field_match.group(1).strip()
+
+                # Enhanced path resolution with priority system
+                if 'path' not in parsed_data or not parsed_data['path']:
+                    if shared_context.get('path'):
+                        parsed_data['path'] = shared_context['path']
+                    elif parsed_data.get('dev') and parsed_data.get('ino'):
+                        parsed_data['path'] = f"dev:{parsed_data['dev']},inode:{parsed_data['ino']}"
+                        parsed_data['path_type'] = 'dev_inode'
+                    elif shared_context.get('dev') and shared_context.get('inode'):
+                        parsed_data['path'] = f"dev:{shared_context['dev']},inode:{shared_context['inode']}"
+                        parsed_data['path_type'] = 'dev_inode'
+                else:
+                    parsed_data['path_type'] = 'file_path'
+
+                # Use comm as fallback for proctitle if needed
+                if parsed_data.get('proctitle') in ["(null)", "null", "", None] and parsed_data.get('comm'):
+                    parsed_data['proctitle'] = parsed_data['comm']
+
+                break
 
         return parsed_data
 
@@ -244,16 +362,36 @@ class SELinuxMCPClient:
         table.add_column("Component", style="cyan", no_wrap=True)
         table.add_column("Value", style="white")
 
-        # Basic info
+        # Enhanced info with timestamp and more details
+        if parsed_log.get("datetime_str"):
+            table.add_row("Timestamp", parsed_log["datetime_str"])
+
         table.add_row("Process", parsed_log.get("comm", "Unknown"))
         table.add_row("PID", parsed_log.get("pid", "Unknown"))
+
+        if parsed_log.get("exe"):
+            table.add_row("Executable", parsed_log["exe"])
+
         table.add_row("Permission Denied", parsed_log.get("permission", "Unknown"))
         table.add_row("Target Class", parsed_log.get("tclass", "Unknown"))
         table.add_row("Source Context", parsed_log.get("scontext", "Unknown"))
         table.add_row("Target Context", parsed_log.get("tcontext", "Unknown"))
 
         if parsed_log.get("path"):
-            table.add_row("File Path", parsed_log["path"])
+            path_display = parsed_log["path"]
+            if parsed_log.get("path_type") == "dev_inode":
+                path_display += " (device+inode)"
+            table.add_row("File Path", path_display)
+
+        if parsed_log.get("cwd"):
+            table.add_row("Working Directory", parsed_log["cwd"])
+
+        if parsed_log.get("dest_port"):
+            table.add_row("Target Port", parsed_log["dest_port"])
+
+        if parsed_log.get("permissive"):
+            mode = "Permissive" if parsed_log["permissive"] == "1" else "Enforcing"
+            table.add_row("SELinux Mode", mode)
 
         self.console.print(table)
 
@@ -300,13 +438,14 @@ class SELinuxMCPClient:
     async def interactive_analysis(self):
         """Interactive analysis mode with enhanced features"""
         self.console.print(Panel.fit(
-            "[bold blue]🔒 SELinux AI Troubleshooter - Enhanced MCP Edition[/bold blue]\n"
-            "[cyan]Powered by Local LLM + RAG + MCP Tools[/cyan]",
+            "[bold blue]🔒 SELinux AI Troubleshooter - Enhanced Edition[/bold blue]\n"
+            "[cyan]Powered by Advanced Analysis + Heuristics[/cyan]",
             border_style="blue"
         ))
 
-        # Start MCP session
-        await self.start_mcp_session()
+        # Start MCP session if enabled
+        if self.mcp_enabled:
+            await self.start_mcp_session()
 
         self.console.print("\n[yellow]📝 Paste your SELinux audit log below.[/yellow]")
         self.console.print("[dim]Press Ctrl+D when finished, or 'quit' to exit[/dim]\n")
@@ -448,16 +587,20 @@ class SELinuxMCPClient:
 
     async def cleanup(self):
         """Cleanup MCP session"""
-        if self.session_cm and self.session:
-            try:
-                await self.session_cm.__aexit__(None, None, None)
-            except:
-                pass
-        elif self.session:
-            try:
+        try:
+            if self.session:
                 await self.session.close()
-            except:
-                pass
+        except:
+            pass
+
+        try:
+            if self.session_cm:
+                await self.session_cm.__aexit__(None, None, None)
+        except:
+            pass
+
+        self.session = None
+        self.session_cm = None
 
 async def main():
     """Main async entry point"""
